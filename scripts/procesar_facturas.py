@@ -35,7 +35,7 @@ MESES = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio",
 
 # (patron en texto/remitente/asunto, proveedor como aparece en el libro, categoria, descripcion)
 PROVEEDORES = [
-    (r"bm\.cr|grupo bm|bm supermercado", "BM Supermercado", "Alimentos y bebidas", "Pedido para alimentacion empleados"),
+    (r"bm\.cr|grupo bm|bm supermercado|bm de uvita|3101560680", "BM Supermercado", "Alimentos y bebidas", "Pedido para alimentacion empleados"),
     (r"coopeagri", "Coopeagri", "Combustible y transporte", "Gasolina"),
     (r"colonos\.com|fejungla|el colono|colono", "Colono", "Mantenimiento y reparaciones", "Materiales de Construccion"),
     (r"grupomateriales|materiales la costa", "Grupo Materiales", "Mantenimiento y reparaciones", "Materiales de Construccion"),
@@ -64,6 +64,10 @@ PROVEEDORES = [
     (r"smart506", "Smart506", "Software y tecnología", "Factura Electronica"),
     (r"cr contadores", "CR Contadores", "Imprevistos y otros", "Servicios Contables"),
     (r"vio ?gas", "Vio Gas", "Suministros y amenities", "Gas"),
+    (r"mosaic", "Mosaic", "Alimentos y bebidas", "Gastos de representacion"),
+    (r"mario arias", "Mario Arias", "Mantenimiento y reparaciones", "Materiales de reparacion"),
+    (r"instituto nacional de seguros|grupoins", "INS", "Seguros", "Poliza de seguro"),
+    (r"langosta feliz", "La Langosta Feliz", "Alimentos y bebidas", "Gastos de representacion"),
     (r"ekono", "Ekono", "Suministros y amenities", "Articulos para habitaciones"),
     (r"\bice\b|instituto costarricense de electricidad", "ICE", "Servicios públicos e internet", "Energia / telefonia"),
 ]
@@ -151,26 +155,6 @@ def analizar(item, base_dir):
         fecha = dt.date.fromisoformat(item["emailDate"][:10])
     r["fecha"] = fecha
 
-    # Total del comprobante. Entre la etiqueta y el numero solo se permiten espacios,
-    # simbolos de moneda, ':' o '*'; asi se evitan "Total en letras", "Total gravado", etc.
-    total = None
-    sep = r"(?:[ \t¢₡$:*]|crc|usd)*"
-    plano = re.sub(r"sub\s*-?\s*total", "subtotal", plano)
-    especificas = [r"total\s+comprobante", r"total\s+(?:de\s+la\s+)?factura", r"total\s+a\s+pagar",
-                   r"total\s+en\s+(?:crc|usd)", r"total\s+documento", r"monto\s+total", r"total\s+general",
-                   r"total\s+servicio", r"total\s+neto"]
-    for pat in especificas + [r"(?<![a-z])total"]:
-        hallados = [a_numero(m.group(1)) for m in re.finditer(pat + sep + NUM, plano)]
-        hallados = [v for v in hallados if v]
-        if hallados:
-            total = hallados[-1]
-            break
-    if total is None:  # ultima opcion: "total" generico (no subtotal) mas cercano al final
-        hallados = [a_numero(m.group(1)) for m in re.finditer(r"(?<!sub)(?<!sub )(?<!sub - )\btotal" + sep + NUM, plano)]
-        hallados = [v for v in hallados if v]
-        total = hallados[-1] if hallados else None
-    r["total"] = total
-
     # Moneda: primero la declaracion explicita "Moneda: ...", luego simbolos
     m = re.search(r"moneda[^\n]{0,80}?\b(usd|crc|dolar\w*|colon\w*|us\$)", plano)
     if m:
@@ -183,9 +167,31 @@ def analizar(item, base_dir):
         moneda = "CRC"
     r["moneda"] = moneda
 
+    # Total del comprobante. Entre la etiqueta y el numero solo se permiten espacios,
+    # simbolos de moneda, ':', '*' o '(USD)'; asi se evitan "Total en letras", "Total gravado", etc.
+    otra = "usd" if moneda == "CRC" else "crc"
+    total = None
+    sep = r"(?:[ \t¢₡$:*()]|crc|usd)*"
+    plano = re.sub(r"sub\s*-?\s*total", "subtotal", plano)
+    especificas = [r"total\s+comprobante", r"total\s+(?:de\s+la\s+)?factura(?:\s+electronica)?",
+                   r"total\s+a\s+pagar", r"total\s+en\s+(?:crc|usd)", r"total\s+documento", r"monto\s+total",
+                   r"total\s+general", r"total\s+servicio", r"total\s+neto"]
+    for pat in especificas + [r"(?<![a-z])total", r"total\s+venta"]:
+        hallados = []
+        for m in re.finditer("(" + pat + sep + ")" + NUM, plano):
+            if otra in m.group(1):
+                continue
+            v = a_numero(m.group(2))
+            if v:
+                hallados.append(v)
+        if hallados:
+            total = hallados[-1]
+            break
+    r["total"] = total
+
     # Medio de pago
     metodo = "Tarjeta"
-    m = re.search(r"medio\s+de\s+pago[^\n:]*:?\s*([a-z /]+)", plano)
+    m = re.search(r"(?:medio\s+de\s+pago|\bm\.p)[^\n:]*:?\s*([a-z /]+)", plano)
     if m:
         v = m.group(1)
         if "efectivo" in v:
@@ -207,10 +213,14 @@ def analizar(item, base_dir):
         if m:
             prov = m.group(1).strip(" .")
         else:
-            prim = [l.strip() for l in texto.splitlines() if l.strip()]
-            prov = prim[0][:60] if prim else (item.get("originalSender") or "Desconocido")
+            prim = [l.strip() for l in texto.splitlines()
+                    if l.strip() and not re.search(r"factura|comprobante|documento|fecha|invoice|hora|clave", l, re.I)
+                    and re.search(r"[A-Za-z]{3}", l)]
+            prov = re.split(r"\s{3,}", prim[0])[0][:60] if prim else (item.get("originalSender") or "Desconocido")
+        prov = re.sub(r"^\s*emisor\s*:\s*", "", prov, flags=re.I).strip()
     r["proveedor"], r["categoria"], r["descripcion"] = prov, cat, desc
-    r["revisar"] = total is None or clave is None
+    r["es_factura"] = clave is not None
+    r["revisar"] = total is None
     return r
 
 
@@ -228,7 +238,7 @@ def cargar_manifest(paths):
                     d = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if d.get("filename") and d.get("path") and not d.get("error"):
+                if d.get("filename") and d.get("path") and not d.get("error") and not d.get("descartado"):
                     items.append(d)
     return items
 
@@ -237,16 +247,40 @@ def norm(s):
     return re.sub(r"[^a-z0-9]", "", sin_acentos(str(s or "")).lower())
 
 
-def consecutivos_existentes(ws):
-    """Pares (numero de factura, proveedor) ya anotados en Gastos Diarios."""
-    vistos = set()
+def registros_existentes(ws):
+    """Filas ya anotadas en Gastos Diarios: (fecha, proveedor, numero, monto original)."""
+    filas = []
     for row in ws.iter_rows(min_row=6, values_only=True):
-        g = row[6] if len(row) > 6 else None
-        prov = norm(row[3] if len(row) > 3 else "")
-        nums = [int(g)] if isinstance(g, (int, float)) else [int(n) for n in re.findall(r"\d+", g or "")] if isinstance(g, str) else []
-        for n in nums:
-            vistos.add((n, prov))
-    return vistos
+        if len(row) < 7 or not row[3]:
+            continue
+        g, mf = row[6], row[5]
+        num = str(int(g)) if isinstance(g, (int, float)) else re.sub(r"\D", "", g or "") if isinstance(g, str) else ""
+        monto = None
+        if isinstance(mf, (int, float)):
+            monto = float(mf)
+        elif isinstance(mf, str):
+            m = re.match(r"=\s*([0-9.]+)", mf)
+            monto = float(m.group(1)) if m else None
+        fecha = row[0].date() if isinstance(row[0], dt.datetime) else None
+        filas.append((fecha, norm(row[3]), num, monto))
+    return filas
+
+
+def mismo_proveedor(a, b):
+    return bool(a and b) and (a[:5] == b[:5] or a in b or b in a)
+
+
+def ya_en_libro(f, filas):
+    num = (f.get("consecutivo") or "").lstrip("0")
+    prov = norm(f["proveedor"])
+    for fecha, p, n, monto in filas:
+        if not mismo_proveedor(prov, p):
+            continue
+        if n and num and len(n) >= 3 and num.endswith(n):
+            return True
+        if monto and f["total"] and abs(monto - f["total"]) < 1 and fecha and abs((fecha - f["fecha"]).days) <= 5:
+            return True
+    return False
 
 
 def ultima_fila(ws):
@@ -260,12 +294,12 @@ def ultima_fila(ws):
 def construir_excel(facturas, plantilla, salida_xlsx):
     wb = openpyxl.load_workbook(plantilla)
     ws = wb["Gastos Diarios"]
-    existentes = consecutivos_existentes(ws)
+    existentes = registros_existentes(ws)
     fila = ultima_fila(ws) + 1
     agregadas, ya = [], []
-    for f in facturas:
+    for f in sorted(facturas, key=lambda x: (x["fecha"], x["proveedor"])):
         num = int(f["consecutivo"][-10:]) if f.get("consecutivo") else None
-        if num is not None and (num, norm(f["proveedor"])) in existentes:
+        if ya_en_libro(f, existentes):
             f["estado_libro"] = "Ya registrada"
             ya.append(f)
             continue
@@ -290,8 +324,6 @@ def construir_excel(facturas, plantilla, salida_xlsx):
         ws.cell(fila, 8, "Auto-correo")
         f["estado_libro"] = f"Agregada (fila {fila})"
         agregadas.append(f)
-        if num is not None:
-            existentes.add((num, norm(f["proveedor"])))
         fila += 1
 
     # Hojas por mes
@@ -398,7 +430,14 @@ def organizar(nuevos, base_nuevos, repo):
     import shutil
     reg_path = os.path.join(repo, "facturas", "registro.jsonl")
     registro = cargar_manifest([reg_path])
-    vistos = {(r.get("messageId"), r.get("filename")) for r in registro}
+    vistos = set()
+    if os.path.exists(reg_path):
+        with open(reg_path, encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip():
+                    d = json.loads(line)
+                    vistos.add((d.get("messageId"), d.get("filename")))
+    descartados = []
     claves = set()
     for r in registro:
         claves.add(r.get("clave") or r["path"])
@@ -407,6 +446,13 @@ def organizar(nuevos, base_nuevos, repo):
         if (it.get("messageId"), it.get("filename")) in vistos:
             continue
         f = analizar(it, base_nuevos)
+        if not f["es_factura"]:  # recibos, contratos, etc.: se anotan para no revisarlos otra vez
+            vistos.add((it.get("messageId"), it.get("filename")))
+            d = dict(it, descartado=True, motivo="PDF sin clave de factura electronica")
+            descartados.append(d)
+            with open(reg_path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(d, ensure_ascii=False) + "\n")
+            continue
         llave = f.get("clave") or it["path"]
         if llave in claves:
             continue
@@ -424,7 +470,7 @@ def organizar(nuevos, base_nuevos, repo):
         agregados.append(nuevo)
         with open(reg_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(nuevo, ensure_ascii=False) + "\n")
-    return registro, agregados
+    return registro, agregados, descartados
 
 
 def main():
@@ -436,11 +482,15 @@ def main():
     ap.add_argument("--salida", required=True)
     a = ap.parse_args()
 
-    registro, recien = organizar(cargar_manifest(a.nuevos), a.base_nuevos, a.repo)
+    registro, recien, descartados = organizar(cargar_manifest(a.nuevos), a.base_nuevos, a.repo)
     nuevos_ids = {(r.get("messageId"), r.get("filename")) for r in recien}
     facturas = []
+    no_facturas = []
     for it in registro:
         f = analizar(it, a.repo)
+        if not f["es_factura"]:
+            no_facturas.append(f)
+            continue
         f["nueva"] = (it.get("messageId"), it.get("filename")) in nuevos_ids
         facturas.append(f)
 
@@ -459,6 +509,7 @@ def main():
     resumen = {
         "xlsx": xlsx, "pdf": pdf, "total_facturas": len(facturas), "nuevas_hoy": len(recien),
         "agregadas_libro": len(agregadas), "ya_registradas": len(ya),
+        "no_facturas": [d.get("filename") for d in descartados] + [f["archivo"] for f in no_facturas],
         "revisar": [{"archivo": f["archivo"], "proveedor": f["proveedor"], "total": f["total"]}
                     for f in facturas if f["revisar"]],
         "por_mes": {f"{MESES[m]} {y}": {"facturas": len(v), "usd": round(sum(usd(x) for x in v), 2)}
