@@ -30,6 +30,7 @@ XLSX = os.path.join(REPO, "Copy of Canavida Gastos Ingresos Oficial (2).xlsx")
 STATE = os.path.join(REPO, "automatizacion", "procesados.json")
 SHEET = "Gastos Diarios"
 FIRST_ROW = 6
+INICIO = "2026-10-01"
 MESES = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto",
          "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 
@@ -66,13 +67,28 @@ def main():
 
     # Última fila con gasto real (columna B o F con dato)
     last = FIRST_ROW - 1
-    existing_g = set()
+    existing = []  # (fecha, Nº factura)
     for r in range(FIRST_ROW, ws.max_row + 1):
         if ws.cell(r, 2).value or ws.cell(r, 6).value:
             last = r
             g = ws.cell(r, 7).value
+            f = ws.cell(r, 1).value
             if isinstance(g, (int, float)):
-                existing_g.add(int(g))
+                existing.append((f.date() if isinstance(f, dt.datetime) else None, int(g)))
+
+    def ya_registrada(d):
+        c = d.get("consec_corto")
+        if c is None:
+            return False
+        c = int(c)
+        fd = dt.date.fromisoformat(d["fecha"])
+        for f, g in existing:
+            if g == c and (f is None or abs((f - fd).days) <= 45):
+                return True
+            # Nº escrito abreviado (ej. 687 por 20687) con fecha cercana
+            if len(str(g)) >= 3 and str(c).endswith(str(g)) and f and abs((f - fd).days) <= 5:
+                return True
+        return False
 
     nuevos, omitidos, revisar = [], [], []
     for path in sorted(glob.glob(os.path.join(src, "*.json"))):
@@ -87,7 +103,10 @@ def main():
         if key in state["consecutivos"]:
             omitidos.append((key, "ya procesado en una corrida anterior"))
             continue
-        if d.get("consec_corto") is not None and int(d["consec_corto"]) in existing_g:
+        if d["fecha"] < INICIO:
+            omitidos.append((key, f"fecha {d['fecha']} fuera del periodo de la hoja"))
+            continue
+        if ya_registrada(d):
             omitidos.append((key, "Nº de factura ya registrado en la hoja"))
             state["consecutivos"].append(key)
             continue
