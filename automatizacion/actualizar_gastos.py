@@ -103,6 +103,9 @@ def main():
         if key in state["consecutivos"]:
             omitidos.append((key, "ya procesado en una corrida anterior"))
             continue
+        if d.get("consec_corto") in (None, "") or d.get("total") in (None, ""):
+            omitidos.append((d.get("proveedor"), "no es factura (recibo/comprobante/sin total) – no se registra"))
+            continue
         if d["fecha"] < INICIO:
             omitidos.append((key, f"fecha {d['fecha']} fuera del periodo de la hoja"))
             continue
