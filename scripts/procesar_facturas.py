@@ -69,6 +69,7 @@ PROVEEDORES = [
     (r"instituto nacional de seguros|grupoins", "INS", "Seguros", "Poliza de seguro"),
     (r"langosta feliz", "La Langosta Feliz", "Alimentos y bebidas", "Gastos de representacion"),
     (r"ekono", "Ekono", "Suministros y amenities", "Articulos para habitaciones"),
+    (r"crystalline ?water ?pools|abarca uma[nñ]a", "Crystalline Water Pools", "Jardinería y piscinas", "Mantenimiento de piscinas"),
     (r"\bice\b|instituto costarricense de electricidad", "ICE", "Servicios públicos e internet", "Energia / telefonia"),
 ]
 
@@ -173,12 +174,12 @@ def analizar(item, base_dir):
     total = None
     sep = r"(?:[ \t¢₡$:*()]|crc|usd)*"
     plano = re.sub(r"sub\s*-?\s*total", "subtotal", plano)
-    especificas = [r"total\s+comprobante", r"total\s+(?:de\s+la\s+)?factura(?:\s+electronica)?",
+    especificas = [r"total\s+a\s+cancelar", r"total\s+facturado\s+periodo\s+actual", r"total\s+comprobante", r"total\s+(?:de\s+la\s+)?factura(?:\s+electronica)?",
                    r"total\s+a\s+pagar", r"total\s+en\s+(?:crc|usd)", r"total\s+documento", r"monto\s+total",
                    r"total\s+general", r"total\s+servicio", r"total\s+neto"]
     for pat in especificas + [r"(?<![a-z])total", r"total\s+venta"]:
         hallados = []
-        for m in re.finditer("(" + pat + sep + ")" + NUM, plano):
+        for m in re.finditer("((?<![a-z])" + pat + sep + ")" + NUM, plano):
             if otra in m.group(1):
                 continue
             v = a_numero(m.group(2))
@@ -187,6 +188,11 @@ def analizar(item, base_dir):
         if hallados:
             total = hallados[-1]
             break
+    if total is None:
+        # Algunos formatos (p. ej. Nebbia) ponen el monto en la linea anterior a "Total:"
+        m = re.search(NUM + r"\s*\n\s*total\s*:", plano)
+        if m:
+            total = a_numero(m.group(1))
     r["total"] = total
 
     # Medio de pago
