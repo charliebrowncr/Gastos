@@ -70,6 +70,8 @@ PROVEEDORES = [
     (r"langosta feliz", "La Langosta Feliz", "Alimentos y bebidas", "Gastos de representacion"),
     (r"ekono", "Ekono", "Suministros y amenities", "Articulos para habitaciones"),
     (r"crystalline ?water ?pools|abarca uma[nñ]a", "Crystalline Water Pools", "Jardinería y piscinas", "Mantenimiento de piscinas"),
+    (r"direccion de agua|da\.go\.cr", "Direccion de Agua (MINAE)", "Servicios públicos e internet", "Canon de aprovechamiento de agua"),
+    (r"tico gringo", "Tico Gringo", "Imprevistos y otros", "Farmacia / botiquin"),
     (r"\bice\b|instituto costarricense de electricidad", "ICE", "Servicios públicos e internet", "Energia / telefonia"),
 ]
 
@@ -130,7 +132,16 @@ def analizar(item, base_dir):
             clave = "506" + m.group(1)
             break
     r["clave"] = clave
-    consecutivo = clave[21:41] if clave else None
+    # Facturas sin clave de Hacienda (proveedores del exterior, instituciones publicas)
+    # que traen su propio numero de factura explicito.
+    numero_doc = None
+    if not clave:
+        m = re.search(r"invoice\s+(?:number|no\.?|#)\s*:?\s*([A-Z0-9][A-Z0-9-]{3,})", texto, re.I) or \
+            re.search(r"factura\s+(?:no\.?|n[ºo°])\s*:?\s*(\d{4,})", texto, re.I)
+        if m:
+            numero_doc = m.group(1)
+    r["numero_doc"] = numero_doc
+    consecutivo = clave[21:41] if clave else numero_doc
     if not consecutivo:
         m = re.search(r"\b(\d{20})\b", texto + " " + (item.get("subject") or ""))
         consecutivo = m.group(1) if m else None
@@ -150,6 +161,13 @@ def analizar(item, base_dir):
         if m:
             try:
                 fecha = dt.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+            except ValueError:
+                pass
+    if not fecha:
+        m = re.search(r"invoice\s+date:\s*(\d{1,2})\s+([A-Za-z]{3})[a-z]*\s+(20\d{2})", texto, re.I)
+        if m:
+            try:
+                fecha = dt.datetime.strptime(f"{m.group(1)} {m.group(2)[:3].title()} {m.group(3)}", "%d %b %Y").date()
             except ValueError:
                 pass
     if not fecha and item.get("emailDate"):
@@ -176,7 +194,7 @@ def analizar(item, base_dir):
     plano = re.sub(r"sub\s*-?\s*total", "subtotal", plano)
     especificas = [r"total\s+a\s+cancelar", r"total\s+facturado\s+periodo\s+actual", r"total\s+comprobante", r"total\s+(?:de\s+la\s+)?factura(?:\s+electronica)?",
                    r"total\s+a\s+pagar", r"total\s+en\s+(?:crc|usd)", r"total\s+documento", r"monto\s+total",
-                   r"total\s+general", r"total\s+servicio", r"total\s+neto"]
+                   r"total\s+general", r"total\s+servicio", r"total\s+neto", r"total\s+amount", r"total\s+paid"]
     for pat in especificas + [r"(?<![a-z])total", r"total\s+venta"]:
         hallados = []
         for m in re.finditer("((?<![a-z])" + pat + sep + ")" + NUM, plano):
@@ -197,7 +215,7 @@ def analizar(item, base_dir):
 
     # Medio de pago
     metodo = "Tarjeta"
-    m = re.search(r"(?:medio\s+de\s+pago|\bm\.p)[^\n:]*:?\s*([a-z /]+)", plano)
+    m = re.search(r"(?:medio\s+(?:de\s+)?pago|\bm\.p)([^\n]{0,60})", plano)
     if m:
         v = m.group(1)
         if "efectivo" in v:
@@ -225,7 +243,7 @@ def analizar(item, base_dir):
             prov = re.split(r"\s{3,}", prim[0])[0][:60] if prim else (item.get("originalSender") or "Desconocido")
         prov = re.sub(r"^\s*emisor\s*:\s*", "", prov, flags=re.I).strip()
     r["proveedor"], r["categoria"], r["descripcion"] = prov, cat, desc
-    r["es_factura"] = clave is not None
+    r["es_factura"] = clave is not None or numero_doc is not None
     r["revisar"] = total is None
     return r
 
@@ -247,6 +265,14 @@ def cargar_manifest(paths):
                 if d.get("filename") and d.get("path") and not d.get("error") and not d.get("descartado"):
                     items.append(d)
     return items
+
+
+def num_factura(f):
+    """Numero corto para la columna 'N factura': entero si el consecutivo es numerico, si no el texto."""
+    c = f.get("consecutivo")
+    if not c:
+        return None
+    return int(c[-10:]) if c[-10:].isdigit() else c
 
 
 def norm(s):
@@ -304,7 +330,7 @@ def construir_excel(facturas, plantilla, salida_xlsx):
     fila = ultima_fila(ws) + 1
     agregadas, ya = [], []
     for f in sorted(facturas, key=lambda x: (x["fecha"], x["proveedor"])):
-        num = int(f["consecutivo"][-10:]) if f.get("consecutivo") else None
+        num = num_factura(f)
         if ya_en_libro(f, existentes):
             f["estado_libro"] = "Ya registrada"
             ya.append(f)
@@ -360,7 +386,7 @@ def construir_excel(facturas, plantilla, salida_xlsx):
                 usd = f["total"] * signo / (TIPO_CAMBIO if f["moneda"] == "CRC" else 1)
             vals = [f["fecha"], f["categoria"], f["descripcion"], f["proveedor"], f["metodo"],
                     round(usd, 2) if usd is not None else None,
-                    int(f["consecutivo"][-10:]) if f.get("consecutivo") else None,
+                    num_factura(f),
                     f["moneda"], f["total"], f["tipo_doc"], f.get("clave"), f.get("estado_libro", ""),
                     os.path.basename(f["archivo"])]
             for c, v in enumerate(vals, 1):
