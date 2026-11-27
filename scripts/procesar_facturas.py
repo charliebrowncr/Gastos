@@ -26,16 +26,16 @@ MEDIO = {"01": "Efectivo", "02": "Tarjeta", "03": "Transferencia / SINPE", "04":
 
 # (palabras clave en emisor/descripción) -> categoría de la plantilla
 CATEGORIAS = [
-    (r"supermercado|walmart|maxi pali|masxmenos|\bpali\b|automercado|bm |fruta|verdura|carnicer|panader|restaur|soda|burrito|mariscos|pizza|cafe|coffee|licor|spirits|wine|vino|bebida|alimento|harina|café del valle", "Alimentos y bebidas"),
-    (r"gasolin|combustible|servicentro|coopeagri|estacion de servicio|\bgs\b|taller|repuesto|llanta|transporte|uber", "Combustible y transporte"),
-    (r"ferreter|fixsur|material|construc|acarreo|agregado|piedra|arena|silicon|bisagra|colono|madera|coopemadereros|el lagar|\bepa\b|pintura|electric|plomer|cemento|vidrio", "Mantenimiento y reparaciones"),
-    (r"\bice\b|instituto costarricense de electricidad|kolbi|telefon|celular|internet|cnfl|aya|acueducto|agua|energ|electricidad|liberty|claro|tigo|wireless", "Servicios públicos e internet"),
+    (r"supermercado|walmart|maxi pali|masxmenos|\bpali\b|automercado|bm |fruta|verdura|carnicer|panader|restaur|soda|burrito|mariscos|pizza|cafe|coffee|licor|spirits|wine|vino|cabernet|sauvignon|bebida|alimento|harina|café del valle", "Alimentos y bebidas"),
+    (r"gasolin|combustible|servicentro|coopeagri|estacion de servicio|\bgs\b|taller|mecanic|repuesto|llanta|transporte|uber", "Combustible y transporte"),
+    (r"ferreter|fixsur|material|construc|acarreo|agregado|piedra|arena|silicon|bisagra|colono|madera|coopemadereros|el lagar|\bepa\b|pintura|thinner|primer|diluyente|lijable|puerta|ventana|reparaci|mantenimiento|bambu|bambú|electric|plomer|cemento|vidrio", "Mantenimiento y reparaciones"),
+    (r"ministerio de ambiente|direcci[oó]n de agua|\bice\b|instituto costarricense de electricidad|kolbi|telefon|celular|internet|cnfl|aya|acueducto|agua|energ|electricidad|liberty|claro|tigo|wireless", "Servicios públicos e internet"),
     (r"instituto nacional de seguros|\bins\b|seguro|poliza|póliza|assa|mapfre", "Seguros"),
     (r"ccss|caja costarricense", "Cargas sociales (CCSS/INS)"),
     (r"contador|accounting|contab|abogad|legal|notari|medic|farmac|clinic|urgent|hospital", "Imprevistos y otros"),
     (r"lavander|limpieza|cleaner|detergente|cloro", "Limpieza y lavandería"),
     (r"piscina|pool|jardin|vivero|botica|agro", "Jardinería y piscinas"),
-    (r"software|tecnolog|smart506|computo|computadora|electronic|celular|apple|google|microsoft|pricelabs|breezeway|lodgify|\bquo\b|openphone", "Software y tecnología"),
+    (r"software|tecnolog|smart506|computo|computadora|electronic|celular|apple|google|microsoft|pricelabs|breezeway|lodgify|\bquo\b|openphone|nomina|nómina|bit cloud", "Software y tecnología"),
     (r"mueble|muebler|colchon|colchón", "Muebleria"),
     (r"booking|airbnb|expedia|comision", "Comisiones de plataformas"),
     (r"municipal|hacienda|patente|impuesto", "Impuestos y patentes"),
@@ -117,7 +117,7 @@ def parse_pdf(path):
     except Exception:
         t = ""
     d = {"texto": t}
-    m = re.search(r"\b(506\d{47})\b", t.replace(" ", "")) or re.search(r"(506\d{47})", os.path.basename(path))
+    m = re.search(r"(?<!\d)(506\d{47})(?!\d)", t) or re.search(r"(?<!\d)(506\d{47})(?!\d)", os.path.basename(path))
     if m:
         d["clave"] = m.group(1)
     tot = None
@@ -128,7 +128,12 @@ def parse_pdf(path):
             tot = to_num(ms[-1])
             break
     d["total"] = tot
-    d["moneda"] = "USD" if re.search(r"\bUSD\b|D[oó]lares|US\$|\$\s?\d", t) and not re.search(r"¢|CRC|colones", t, re.I) else "CRC"
+    usd_ = re.search(r"\bUSD\s?\$?\s?\d|US\$|(?<![A-Za-z¢])\$\s?\d|Moneda:?\s*USD|D[oó]lares", t)
+    crc_ = re.search(r"¢|₡|\bCRC\s?\d|Moneda:?\s*CRC|colones", t, re.I)
+    d["moneda"] = "USD" if usd_ and not crc_ else "CRC"
+    d["prefactura"] = bool(re.search(r"pre-?\s?factura|proforma", t[:1500], re.I))
+    lineas = [l.strip() for l in t.splitlines() if len(l.strip()) > 3]
+    d["primera_linea"] = re.split(r"\s{3,}", lineas[0])[0][:60] if lineas else None
     m = re.search(r"Fecha(?:\s+de)?\s+emisi[oó]n[:\s]*(\d{1,2})[/-](\d{1,2})[/-](\d{4})", t, re.I)
     if m:
         try:
@@ -155,10 +160,12 @@ def clave_info(clave):
 
 
 def categoria(*txts):
-    s = " ".join(t for t in txts if t).lower()
-    for pat, cat in CATEGORIAS:
-        if re.search(pat, s):
-            return cat
+    """Prueba cada texto por orden de confianza (proveedor, razón social, detalle, texto PDF)."""
+    for t in txts:
+        s = (t or "").lower()
+        for pat, cat in CATEGORIAS:
+            if s and re.search(pat, s):
+                return cat
     return "Imprevistos y otros"
 
 
@@ -201,6 +208,15 @@ def load(dl):
         used = set()
         for pdf in pdfs:
             pd_ = parse_pdf(pdf)
+            tx = pd_.get("texto", "")
+            es_factura = bool(pd_.get("clave")) or any(xx["clave"] and xx["clave"] in tx.replace(" ", "") for xx in xmls) or \
+                bool(re.search(r"factura|invoice|receipt|recibo|comprobante|tiquete|ticket electr|nota de cr[eé]dito", tx[:4000], re.I)
+                     and re.search(r"total", tx, re.I))
+            if re.search(r"contrato|check-?in|guest messages|contrase[ñn]a|password", os.path.basename(pdf) + " " + tx[:500], re.I) \
+                    and not pd_.get("clave"):
+                es_factura = False
+            if not es_factura:
+                continue
             x = None
             for i, xx in enumerate(xmls):
                 if i not in used and (pd_.get("clave") and xx["clave"] == pd_.get("clave") or len(xmls) == 1 or len(pdfs) == 1):
@@ -218,6 +234,8 @@ def load(dl):
                 except Exception:
                     r["fecha"] = None
             r["emisor"] = src.get("emisor") or emisor_from_subject(meta.get("subject"), meta.get("orig_sender"))
+            if not src.get("emisor") and re.search(r"seguin|multiple|canavida|bundle", r["emisor"] or "", re.I) and pd_.get("primera_linea"):
+                r["emisor"] = pd_["primera_linea"]
             r["emisor_id"] = src.get("emisor_id") or ci.get("emisor_id")
             r["receptor_id"] = src.get("receptor_id")
             r["moneda"] = src.get("moneda") or pd_.get("moneda") or "CRC"
@@ -226,7 +244,7 @@ def load(dl):
             r["medio_pago"] = src.get("medio_pago") or pd_.get("medio_pago") or "Tarjeta"
             r["detalle"] = src.get("detalle") or ""
             r["tipo"] = src.get("tipo") or ("PreFactura" if re.search(r"pre-?factura|proforma", meta.get("subject") or "", re.I) else "PDF")
-            if re.search(r"pre-?factura|proforma", meta.get("subject") or "", re.I):
+            if not src and (pd_.get("prefactura") or re.search(r"pre-?factura|proforma", meta.get("subject") or "", re.I)):
                 r["tipo"] = "PreFactura"
             r["categoria"] = categoria(r["emisor"], src.get("emisor_legal"), r["detalle"], pd_.get("texto", "")[:300])
             r["emitida_por_canavida"] = (r["emisor_id"] or "").lstrip("0") in CANAVIDA_IDS
@@ -244,6 +262,17 @@ def load(dl):
             continue
         seen.add(k)
         out.append(r)
+    # un PDF sin XML que repite monto (±1) y fecha (±5 días) de una factura con XML es la misma factura
+    xmlrecs = [r for r in out if r["fuente"] == "XML"]
+    def repetida(r):
+        if r["fuente"] == "XML" or r["total"] is None:
+            return False
+        for x in xmlrecs:
+            if x["total"] is not None and abs(x["total"] - r["total"]) <= 1 and r["fecha"] and x["fecha"] \
+                    and abs((x["fecha"] - r["fecha"]).days) <= 5:
+                return True
+        return False
+    out = [r for r in out if not repetida(r)]
     out.sort(key=lambda r: (r["fecha"] or dt.date(1900, 1, 1), r["emisor"] or ""))
     return out
 
@@ -251,9 +280,10 @@ def load(dl):
 def usd(r, tc):
     if r["total"] is None:
         return None
+    sg = -1 if r.get("tipo") == "NotaCreditoElectronica" else 1
     if r["moneda"] == "USD":
-        return round(r["total"], 2)
-    return round(r["total"] / tc, 2)
+        return sg * round(r["total"], 2)
+    return sg * round(r["total"] / tc, 2)
 
 
 def build_excel(facturas, plantilla, salida, tc):
@@ -267,25 +297,43 @@ def build_excel(facturas, plantilla, salida, tc):
             last = i
             g = ws.cell(i, 7).value
             try:
-                existentes.add(int(float(str(g).split()[-1])))
+                g = str(int(float(str(g).split()[-1])))
             except Exception:
-                pass
+                g = None
+            f = ws.cell(i, 6).value
+            try:
+                m = re.fullmatch(r"=?\s*([\d.]+)\s*(?:/\s*([\d.]+))?\s*", str(f))
+                f = float(m.group(1)) / (float(m.group(2)) if m.group(2) else 1)
+            except Exception:
+                f = None
+            fd = ws.cell(i, 1).value
+            fd = fd.date() if isinstance(fd, dt.datetime) else None
+            existentes.add((fd, f, g))
     style_row = 6
     row = last + 1
     agregadas = 0
     for r in facturas:
         r["en_gastos"] = False
-        if r["emitida_por_canavida"] or r["tipo"] in ("PreFactura", "NotaCreditoElectronica") or r["total"] is None or not r["fecha"]:
+        if r["emitida_por_canavida"] or r["tipo"] == "PreFactura" or r["total"] is None or not r["fecha"]:
             continue
         num = int(r["consecutivo"][-10:]) if r["consecutivo"] and r["consecutivo"][-10:].isdigit() else None
-        if num is not None and num in existentes:
+        u = usd(r, tc)
+        def igual(e):
+            fd, f, g = e
+            cerca = fd is not None and abs((fd - r["fecha"]).days) <= 3
+            if cerca and g and r["consecutivo"] and r["consecutivo"].endswith(g) and len(g) >= 2:
+                return True
+            return cerca and f is not None and u is not None and abs(f - u) < 0.5
+        if any(igual(e) for e in existentes):
             r["en_gastos"] = "ya registrada"
             continue
         if not (dt.date(2026, 10, 1) <= r["fecha"] <= dt.date(2026, 12, 31)):
             continue
-        vals = [dt.datetime.combine(r["fecha"], dt.time()), r["categoria"], (r["detalle"] or "Factura")[:80], r["emisor"],
+        sg = -1 if r["tipo"] == "NotaCreditoElectronica" else 1
+        desc = ("Nota de crédito: " if sg < 0 else "") + (r["detalle"] or "Factura")
+        vals = [dt.datetime.combine(r["fecha"], dt.time()), r["categoria"], desc[:80], r["emisor"],
                 r["medio_pago"],
-                round(r["total"], 2) if r["moneda"] == "USD" else f"={r['total']:.2f}/{tc:g}",
+                (sg * round(r["total"], 2)) if r["moneda"] == "USD" else f"={'-' if sg < 0 else ''}{r['total']:.2f}/{tc:g}",
                 num if num is not None else r["consecutivo"],
                 "Auto Gmail"]
         for c, v in enumerate(vals, 1):
@@ -336,8 +384,8 @@ def build_excel(facturas, plantilla, salida, tc):
                 if c in (7, 8):
                     cell.number_format = "#,##0.00"
             r_i += 1
-        fs.cell(r_i, 7, "Total USD:").font = Font(bold=True)
-        fs.cell(r_i, 8, f"=SUM(H{first}:H{r_i - 1})").font = Font(bold=True)
+        fs.cell(r_i, 7, "Total USD (sin pre-facturas):").font = Font(bold=True)
+        fs.cell(r_i, 8, f'=SUMIFS(H{first}:H{r_i - 1},J{first}:J{r_i - 1},"<>PreFactura",J{first}:J{r_i - 1},"<>Emitida por Canavida")').font = Font(bold=True)
         fs.cell(r_i, 8).number_format = "$#,##0.00"
         r_i += 2
     for col, w in zip("ABCDEFGHIJKL", [11, 34, 26, 40, 20, 8, 14, 13, 24, 18, 16, 40]):
@@ -348,17 +396,17 @@ def build_excel(facturas, plantilla, salida, tc):
 
 
 def build_pdf(facturas, pormes, salida, tc, max_mb=20):
-    tmp = salida + ".resumen.pdf"
+    tmp = salida.replace("Facturas_por_Mes", "Resumen_Facturas")  # resumen corto (se conserva; cabe en un correo)
     doc = SimpleDocTemplate(tmp, pagesize=landscape(letter), leftMargin=30, rightMargin=30, topMargin=30, bottomMargin=30)
     st = getSampleStyleSheet()
     small = st["BodyText"].clone("s", fontSize=7, leading=8)
     el = [Paragraph("Canavida – Facturas por mes", st["Title"]),
           Paragraph(f"Actualizado {dt.date.today():%d/%m/%Y}. {len(facturas)} facturas PDF encontradas en Gmail. "
-                    f"Montos en colones convertidos a USD a ₡{tc:g}.", st["BodyText"]), Spacer(1, 8)]
+                    f"Montos en colones convertidos a USD a {tc:g} CRC por USD.", st["BodyText"]), Spacer(1, 8)]
     resumen = [["Mes", "Facturas", "Total USD"]]
     for (y, m), items in sorted(pormes.items()):
         resumen.append([f"{MESES[m]} {y}" if y else "Sin fecha", len(items),
-                        f"${sum(usd(f, tc) or 0 for f in items if not f['emitida_por_canavida']):,.2f}"])
+                        f"${sum(usd(f, tc) or 0 for f in items if not f['emitida_por_canavida'] and f['tipo'] != 'PreFactura'):,.2f}"])
     t = Table(resumen, colWidths=[150, 70, 100])
     t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E78")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                            ("GRID", (0, 0), (-1, -1), 0.4, colors.grey), ("ALIGN", (1, 0), (-1, -1), "RIGHT")]))
@@ -393,9 +441,17 @@ def build_pdf(facturas, pormes, salida, tc, max_mb=20):
             incluidas += 1
         except Exception:
             pass
+    for p in w.pages:
+        p.compress_content_streams(level=9)
+        for img in p.images:
+            try:
+                if img.image.width > 1200:
+                    img.replace(img.image, quality=60)
+            except Exception:
+                pass
+    w.compress_identical_objects(remove_duplicates=True, remove_unreferenced=True)
     with open(salida, "wb") as fh:
         w.write(fh)
-    os.remove(tmp)
     return incluidas
 
 
@@ -413,7 +469,7 @@ def main():
     incl = build_pdf(facturas, pormes, pdf, a.tc)
     res = {"facturas": len(facturas), "agregadas_gastos": agregadas, "pdf_incluidas": incl, "xlsx": xlsx, "pdf": pdf,
            "sin_monto": [os.path.basename(f["pdf"]) for f in facturas if f["total"] is None],
-           "por_mes": {f"{MESES[m]} {y}": [len(v), round(sum(usd(f, a.tc) or 0 for f in v if not f['emitida_por_canavida']), 2)]
+           "por_mes": {f"{MESES[m]} {y}": [len(v), round(sum(usd(f, a.tc) or 0 for f in v if not f['emitida_por_canavida'] and f['tipo'] != 'PreFactura'), 2)]
                        for (y, m), v in sorted(pormes.items()) if y}}
     json.dump([{k: (str(v) if isinstance(v, dt.date) else v) for k, v in f.items()} for f in facturas],
               open(os.path.join(a.out, "facturas.json"), "w"), ensure_ascii=False, indent=1)
